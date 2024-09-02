@@ -11,54 +11,95 @@ def get_user_home():
     print(f"Detected user home directory: {user_home}")
     return user_home
 
+def update_or_append_line(file_path, key, value, command=False):
+    """Update a line in the file if the key exists, otherwise append it."""
+    lines = []
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+
+    updated = False
+    for i, line in enumerate(lines):
+        if command and key in line:
+            lines[i] = f"{key} {value}\n"
+            updated = True
+        elif line.strip().startswith(key):
+            lines[i] = f"{key}: {value}\n" if file_path.endswith('.Xresources') else f"{key}={value}\n"
+            updated = True
+
+    if not updated:
+        if command:
+            lines.append(f"{key} {value}\n")
+        else:
+            lines.append(f"{key}: {value}\n" if file_path.endswith('.Xresources') else f"{key}={value}\n")
+
+    with open(file_path, 'w') as file:
+        file.writelines(lines)
+
 def update_config_file(config_path, settings_dict):
-    """Update specific settings in a config file, preserving other settings."""
-    config_lines = []
-    if os.path.exists(config_path):
-        with open(config_path, 'r') as file:
-            config_lines = file.readlines()
+    """Update the configuration file with the provided settings."""
+    if not os.path.exists(config_path):
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        open(config_path, 'w').close()
+
+    with open(config_path, 'r') as file:
+        lines = file.readlines()
 
     updated_lines = []
-    for line in config_lines:
+    for line in lines:
+        updated = False
         for key, value in settings_dict.items():
             if line.strip().startswith(key):
-                line = f"{key} = {value}\n"
-        updated_lines.append(line)
+                updated_lines.append(f"{key}={value}\n" if config_path.endswith(".ini") else f"{key} = {value}\n")
+                updated = True
+                break
+        if not updated:
+            updated_lines.append(line)
 
     for key, value in settings_dict.items():
         if not any(line.strip().startswith(key) for line in updated_lines):
-            updated_lines.append(f"{key} = {value}\n")
+            updated_lines.append(f"{key}={value}\n" if config_path.endswith(".ini") else f"{key} = {value}\n")
 
     with open(config_path, 'w') as file:
         file.writelines(updated_lines)
 
-    print(f"Updated {config_path} with settings: {settings_dict}")
-
 def set_xresources_dpi(dpi, user_home):
     xresources_path = os.path.join(user_home, ".Xresources")
-    settings = {"Xft.dpi": dpi}
-    update_config_file(xresources_path, settings)
+    update_or_append_line(xresources_path, "Xft.dpi", dpi)
     subprocess.run(["xrdb", "-merge", xresources_path])
     print(f"Set Xft DPI to {dpi} in {xresources_path}.")
 
-def set_i3_font_size(font_size, user_home):
+def set_i3_font_size(font_size, dpi, user_home):
     i3_config_path = os.path.join(user_home, ".config/i3/config")
     legacy_i3_config_path = os.path.join(user_home, ".i3/config")
     
     if not os.path.exists(i3_config_path) and os.path.exists(legacy_i3_config_path):
         i3_config_path = legacy_i3_config_path
 
-    config_lines = []
     with open(i3_config_path, 'r') as file:
         config_lines = file.readlines()
 
     with open(i3_config_path, 'w') as file:
+        xrandr_command = f"exec xrandr --dpi {dpi}"
+        xrandr_found = False
+
         for line in config_lines:
             if line.strip().startswith("font"):
                 line = f"font pango:monospace {font_size}\n"
+            elif line.strip().startswith("exec xrandr --dpi"):
+                if not xrandr_found:
+                    line = f"{xrandr_command}\n"
+                    xrandr_found = True
+                else:
+                    continue  # Skip any duplicate lines
             file.write(line)
 
-    print(f"Set i3 font size to {font_size} in {i3_config_path}.")
+        # If the xrandr command was not found, append it
+        if not xrandr_found:
+            file.write(f"{xrandr_command}\n")
+            print(f"Added '{xrandr_command}' to {i3_config_path}.")
+        else:
+            print(f"'{xrandr_command}' was already present and updated if needed in {i3_config_path}.")
 
 def set_gtk_scaling(dpi, font_size, user_home):
     gtk3_config_path = os.path.join(user_home, ".config/gtk-3.0/settings.ini")
@@ -84,11 +125,30 @@ def set_gtk_scaling(dpi, font_size, user_home):
     }
     update_config_file(gtk4_config_path, gtk4_settings)
 
+def update_or_append_env_var(file_path, key, value):
+    """Update or append environment variable in the file."""
+    lines = []
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+
+    updated = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"export {key}="):
+            if line.strip().split("=")[-1] != str(value):
+                lines[i] = f"export {key}={value}\n"
+            updated = True
+
+    if not updated:
+        lines.append(f"export {key}={value}\n")
+
+    with open(file_path, 'w') as file:
+        file.writelines(lines)
+
 def set_qt_scaling(dpi, scale_factor, user_home):
     profile_path = os.path.join(user_home, ".profile")
-    with open(profile_path, 'a+') as profile:
-        profile.write(f"\nexport QT_SCALE_FACTOR={scale_factor}\n")
-        profile.write(f"export QT_FONT_DPI={dpi}\n")
+    update_or_append_env_var(profile_path, "QT_SCALE_FACTOR", scale_factor)
+    update_or_append_env_var(profile_path, "QT_FONT_DPI", dpi)
     print(f"Set QT scaling in {profile_path}.")
 
 def restart_i3wm():
@@ -107,7 +167,7 @@ def main():
         scale_factor = dpi / 96
 
         set_xresources_dpi(dpi, user_home)
-        set_i3_font_size(font_size, user_home)
+        set_i3_font_size(font_size, dpi, user_home)
         set_gtk_scaling(dpi, font_size, user_home)
         set_qt_scaling(dpi, scale_factor, user_home)
 
